@@ -1,0 +1,20 @@
+# Credentials: never commit
+*.pem
+s3cmd-*.conf
+c4gh-pass
+.env
+
+# sda-cli binary: install it per the README instead
+sda-cli
+
+# Runtime output and state
+*.log
+*.csv
+*.db
+state/
+
+# Python
+__pycache__/
+*.egg-info/
+.mypy_cache/
+.pytest_cache/

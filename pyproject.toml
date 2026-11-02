@@ -1,0 +1,32 @@
+[project]
+name = "bp-downloader"
+version = "0.2.0"
+description = "Download and decrypt Bigpicture datasets with sda-cli, tracking each dataset and file in a status database"
+requires-python = ">=3.10"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "mypy>=1.10"]
+
+[project.scripts]
+bp-download = "bp_downloader.cli:main"
+
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src", "tests"]
+addopts = "-ra"
+
+[tool.mypy]
+python_version = "3.10"
+files = ["src", "tests"]
+mypy_path = ["src", "tests"]
+strict = true

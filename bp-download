@@ -1,0 +1,4 @@
+#!/bin/sh
+# Run the downloader from this checkout, without installing it.
+here="$(cd "$(dirname "$0")" && pwd)"
+PYTHONPATH="$here/src${PYTHONPATH:+:$PYTHONPATH}" exec python3 -m bp_downloader "$@"
