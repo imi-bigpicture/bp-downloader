@@ -2,6 +2,7 @@
 
   bp-download add DATASET_ID...         queue datasets
   bp-download run [DATASET_ID...]       download every runnable dataset, or the named ones
+  bp-download run --metadata-only [ID...]  only METADATA/, of the named or all listable datasets
   bp-download status                    one line per dataset
   bp-download requeue DATASET_ID...     reset abandoned files, make datasets runnable again
   bp-download import FILE [--adopt]     queue the dataset IDs in a file; adopt folders on disk
@@ -48,6 +49,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     run = commands.add_parser("run", help="download every runnable dataset, or the named ones")
     run.add_argument("dataset_ids", nargs="*", metavar="DATASET_ID")
+    run.add_argument(
+        "--metadata-only", action="store_true",
+        help="fetch only METADATA/ and leave each dataset's status as it is; without"
+        " DATASET_IDs, every dataset the conf can list (unknown ones are added as held)",
+    )
 
     commands.add_parser("status", help="show every dataset's status")
 
@@ -126,7 +132,10 @@ def cmd_run(config: Config, db: StatusDB, args: argparse.Namespace) -> int:
     for dataset_id in args.dataset_ids:
         record = db.dataset(dataset_id)
         if record is not None and record.status in (COMPLETE, INCOMPLETE):
-            print(f"{dataset_id} is {record.status}: `requeue` it first to run it again")
+            if args.metadata_only:
+                print(f"{dataset_id} is {record.status}: its metadata is already here")
+            else:
+                print(f"{dataset_id} is {record.status}: `requeue` it first to run it again")
         else:
             dataset_ids.append(dataset_id)
     if args.dataset_ids and not dataset_ids:
@@ -140,7 +149,9 @@ def cmd_run(config: Config, db: StatusDB, args: argparse.Namespace) -> int:
         return exc.exit_code
     left = ready.token_expires - datetime.now(timezone.utc)
     print(f"Download token valid until {ready.token_expires:%Y-%m-%d %H:%M} UTC ({left.days} days)")
-    runner = Runner(config, db, cli, ready.access_key, ready.token_expires)
+    runner = Runner(
+        config, db, cli, ready.access_key, ready.token_expires, metadata_only=args.metadata_only
+    )
 
     def on_signal(number: int, _frame: FrameType | None) -> None:
         runner.request_stop(signal.Signals(number).name)

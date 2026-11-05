@@ -100,6 +100,14 @@ class SdaCli:
             deadline=deadline,
         )
 
+    def list_datasets(self, url: str, *, deadline: float | None) -> CallResult:
+        """Every dataset the conf's user can see. Slow: sda-cli sizes each dataset in turn."""
+        return self._call(
+            ["--config", str(self.config.sda_config), "list", "--datasets",
+             "--url", url, "--api-version", self.config.api_version],
+            deadline=deadline,
+        )
+
     def download(
         self,
         url: str,
@@ -155,6 +163,14 @@ def local_path(remote_path: str) -> str:
     if sep and "_" in first and _EMAIL_LIKE.fullmatch(first.replace("_", "@")):
         return rest
     return remote_path
+
+
+_DATASET_ROW = re.compile(r"(aa-Dataset-[a-z0-9]{6}-[a-z0-9]{6})\s*\t")
+
+
+def parse_dataset_listing(output: str) -> list[str]:
+    """Parse `sda-cli list --datasets`: info lines, a header, then `ID \\t files \\t size` rows."""
+    return [m.group(1) for line in output.splitlines() if (m := _DATASET_ROW.match(line))]
 
 
 def parse_listing(output: str) -> list[ListedFile]:

@@ -4,6 +4,7 @@ It copies the real binary's behaviour where the downloader depends on it (read f
 v0.3.5 source and from real logs):
 
 - `list --dataset` prints `FileID \\t Size \\t Path` rows, paths prefixed `DATASET_xxx/`.
+- `list --datasets` prints two info lines, then `DatasetID \\t Files \\t Size` rows.
 - `download --from-file` fetches files in list order and aborts at the first error. It
   drops the `DATASET_xxx/` prefix on disk, writes `<name>.part` then renames, and without
   `--ignore-existing` it prompts on an existing file (EOF on stdin is an error).
@@ -17,10 +18,12 @@ Scenario keys:
   version                  printed by `version`
   passphrase               the private key's passphrase
   datasets                 {id: {"prefix": "DATASET_X", "files": {local_path: plaintext}}}
-  endpoints                {url: {"dead": bool, "lists": [ids], "serves": [ids]}}
+  endpoints                {url: {"dead": bool, "lists": [ids], "serves": [ids]}};
+                           "lists" feeds both `list --dataset` and `list --datasets`
   faults                   [{"op", "url"?, "dataset"?, "path"?, "times", "error"?,
                              "sleep"?, "content"?, "touch"?,
                              "ignore_sigint"?}]
+                           op: "list", "list-datasets", "download" or "decrypt"
   expire_token_after_calls the token reads as expired after this many list/download calls
 """
 
@@ -135,6 +138,25 @@ def check_endpoint(url: str, dataset: str) -> None:
         )
 
 
+def cmd_list_datasets(options: dict[str, str]) -> None:
+    """`list --datasets`: one row per dataset the conf's user can see, sizes human-readable."""
+    url = options["--url"]
+    check_endpoint(url, "")
+    fault = take_fault("list-datasets", url=url)
+    if fault:
+        apply_side_effects(fault)
+        if "error" in fault:
+            fail(fault["error"])
+    host = options.get("--config", "")
+    print("The provided access token expires on Wed, 02 Dec 2026 09:53:22 UTC.")
+    print(f"Remote server (host_base): https://inbox.bp.nbis.se ({Path(host).name})")
+    print(f"{'DatasetID':<41}\t Files \t Size")
+    for dataset in SCENARIO["endpoints"][url].get("lists", []):
+        spec = SCENARIO["datasets"][dataset]
+        size = sum(len(content.encode()) for content in spec["files"].values())
+        print(f"{dataset} \t {len(spec['files'])} \t {size} B")
+
+
 def cmd_list(options: dict[str, str]) -> None:
     url, dataset = options["--url"], options["--dataset"]
     check_endpoint(url, dataset)
@@ -240,7 +262,9 @@ def main() -> None:
         STATE["calls"] += 1  # requests to the server; `version` and `decrypt` make none
         if token_expired(options["--config"]):
             fail(EXPIRED)
-        if command == "list":
+        if command == "list" and "--datasets" in flags:
+            cmd_list_datasets(options)
+        elif command == "list":
             cmd_list(options)
         else:
             cmd_download(options, flags, positional)

@@ -62,9 +62,12 @@ sha256sum sda-cli
 A new sda-cli release can change what this code relies on without any error. Before moving
 the pin, read the release notes and the diff since 0.3.5, and check:
 
-1. **The `list` output format**: `list --bytes` output is parsed by `sdacli.parse_listing`,
-   and `sdacli.local_path` mirrors where sda-cli puts each listed file on disk.
-2. **The `download` and `decrypt` flags** this code passes (`sdacli.py`): `--pubkey`,
+1. **The `list` output formats**: `list --dataset --bytes` output is parsed by
+   `sdacli.parse_listing`, and `sdacli.local_path` mirrors where sda-cli puts each listed
+   file on disk. `list --datasets` output (for `run --metadata-only`) is parsed by
+   `sdacli.parse_dataset_listing`, which takes the rows starting with a dataset ID.
+2. **The `list`, `download` and `decrypt` flags** this code passes (`sdacli.py`): `--dataset`,
+   `--datasets`, `--bytes`, `--url` and `--api-version` for `list`; `--pubkey`,
    `--dataset-id`, `--outdir`, `--api-version`, `--ignore-existing` and `--from-file` for
    `download`; `--key` and `--force-overwrite` for `decrypt`. Every call runs with stdin
    closed, so a new prompt would fail the call rather than wait. `decrypt` exits 0 when single
@@ -87,6 +90,7 @@ Then:
 ./bp-download add aa-Dataset-xxxxxx-xxxxxx   # queue a dataset
 ./bp-download run                            # work through every runnable dataset
 ./bp-download run aa-Dataset-xxxxxx-xxxxxx   # just this one (also runs a held dataset)
+./bp-download run --metadata-only            # only METADATA/, see below
 ./bp-download status                         # one line per dataset
 ./bp-download requeue aa-Dataset-...         # retry abandoned files, or re-run a dataset
 ./bp-download prioritise aa-Dataset-... 10   # higher runs first (default 0)
@@ -237,6 +241,41 @@ at the runtime cap or `TOKEN_MARGIN_HOURS` before the token expires, whichever c
 and warns at the start when it will be the token. Ending on the token stops between calls,
 leaves the dataset `interrupted` (it resumes) and exits 3. `runs` shows the throughput, for
 planning when the next renewal is due.
+
+## Fetching metadata only
+
+```bash
+./bp-download run --metadata-only                        # every dataset the conf can list
+./bp-download run --metadata-only aa-Dataset-xxxxxx-...  # just these (must be in the database)
+SDA_CONFIG=/path/to/secrets/colleague.conf ./bp-download run --metadata-only
+```
+
+Each dataset is listed, and only its `METADATA/` is downloaded, decrypted and checked by size,
+into the same `DATASETS_ROOT/<dataset>/METADATA/` a full run uses. A later full run finds those
+files done and goes straight to the images.
+
+- **Statuses are left alone.** A metadata pass never changes a dataset's status, last
+  error or `no_access` mark, whatever happens to it: a `pending` dataset stays in the
+  backlog, a `held` one stays held, and a 404 doesn't mark it `no_access`. What a listing
+  always records is recorded: the file rows (so `status` shows the metadata as done files,
+  and files dropped from the listing as `gone`), the file counts, and the endpoint.
+- **Files already on disk are not moved.** A metadata file that was there before the run
+  and fails its size check (or won't decrypt) is left where it is, and the dataset is
+  reported without metadata. Only a copy this run fetched itself goes to quarantine and is
+  fetched again. Files encrypted to another key are left as they are.
+- **Without dataset IDs** it first runs `sda-cli list --datasets`, which takes minutes, and
+  covers every dataset listed. One the database doesn't know is added as `held`, with source
+  `listed`, so a plain `run` doesn't start downloading it in full. `requeue` it to put it in
+  the backlog. `complete` and `incomplete` datasets are skipped: their metadata is here.
+- **Another person's conf.** REMS grants access per person, so a colleague's conf may list
+  datasets yours doesn't. Settings in the environment override `.env`, so set `SDA_CONFIG`
+  for the one run. The token's expiry is checked as for any run.
+- **The run's outcome** is in `runs`: the reason reads e.g. `finished (metadata only: 40
+  with metadata, 2 without)`, and the run prints the IDs without metadata. Each dataset's
+  `_download/` log says why. A failed `list --datasets` (after `LISTING_ATTEMPTS` tries)
+  stops the run with exit 3, and nothing is added.
+
+It takes the run lock like any `run`, so it can't start while another run is going.
 
 ## Importing a list of datasets
 
