@@ -274,6 +274,9 @@ files done and goes straight to the images.
   with metadata, 2 without)`, and the run prints the IDs without metadata. Each dataset's
   `_download/` log says why. A failed `list --datasets` (after `LISTING_ATTEMPTS` tries)
   stops the run with exit 3, and nothing is added.
+- **A dataset with no metadata on the server**, one whose listing has no `METADATA/` files
+  at all (some are published that way), counts as without, and its log says the server
+  lists none.
 
 It takes the run lock like any `run`, so it can't start while another run is going.
 

@@ -128,6 +128,25 @@ def test_a_failure_leaves_the_status_alone_and_is_reported(world: World) -> None
     assert "1 with metadata" in reason and "1 without" in reason
 
 
+def test_a_dataset_with_no_metadata_on_the_server_counts_as_without(
+    world: World, capsys: pytest.CaptureFixture[str]
+) -> None:
+    world.remote_dataset(DS, {"IMAGE_a": ["a0"]})
+    files = world.scenario["datasets"][DS]["files"]
+    for path in [p for p in files if p.startswith("METADATA/")]:
+        del files[path]  # the server lists images only, as for aa-Dataset-7p9nzd-4vtpjv
+    world.queue(DS)
+
+    assert world.cli("run", "--metadata-only", DS) == 0
+
+    assert "0 with metadata, 1 without" in last_run_reason(world)
+    out = capsys.readouterr().out
+    assert "lists no METADATA/ files" in out
+    assert f"Without metadata: {DS}" in out
+    assert world.dataset(DS).status == "pending"
+    assert not world.download_lists()
+
+
 def test_an_expired_token_leaves_a_held_dataset_held(world: World) -> None:
     world.remote_dataset(DS, {"IMAGE_a": ["a0"]})
     world.db().add_dataset(DS, status="held")

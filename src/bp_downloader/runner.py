@@ -455,8 +455,12 @@ class DatasetJob:
             f for f in self.db.files(self.dataset_id) if is_metadata(f) and f.state != GONE
         ]
         done = sum(f.state == DONE for f in metadata)
-        self.runner.record_metadata(self.dataset_id, fetched=done == len(metadata))
-        if done == len(metadata):
+        # 0 of 0 is not "with metadata": some datasets are published without any.
+        fetched = bool(metadata) and done == len(metadata)
+        self.runner.record_metadata(self.dataset_id, fetched=fetched)
+        if not metadata:
+            self.log("Metadata: none; the server lists no METADATA/ files for this dataset")
+        elif fetched:
             self.log(f"Metadata: {done} files")
         else:
             self.log(f"Metadata: {done} of {len(metadata)} files; the rest were abandoned")
