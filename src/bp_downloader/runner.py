@@ -16,7 +16,7 @@ from pathlib import Path
 from .checksums import IMAGE_XML, MetadataError, read_checksums, sha256_file
 from .config import Config
 from .errors import ErrorKind, classify, last_error_line
-from .sdacli import CallResult, SdaCli, parse_listing
+from .sdacli import CallResult, SdaCli, parse_dataset_listing, parse_listing
 from .status import (
     COMPLETE,
     DONE,
@@ -74,6 +74,10 @@ class DatasetStopped(Exception):
         self.reason = reason
 
 
+class ListingFailed(Exception):
+    """The conf's datasets could not be listed, so a metadata-only run has nothing to do."""
+
+
 def raise_if_fatal(result: CallResult) -> None:
     kind = classify(result.output)
     if kind in FATAL_KINDS:
@@ -117,8 +121,15 @@ class Runner:
         access_key: str,
         token_expires: datetime,
         echo: Callable[[str], None] = print,
+        metadata_only: bool = False,
     ) -> None:
         self.config = config
+        # Fetch each dataset's METADATA/ and nothing else, and leave every dataset's status
+        # as it was: a metadata pass (often with another person's conf) must not change what
+        # the next full run does.
+        self.metadata_only = metadata_only
+        self.with_metadata = 0
+        self.without_metadata: list[str] = []
         self.access_key = access_key
         self.db = db
         self.cli = cli
@@ -228,8 +239,23 @@ class Runner:
             )
 
     def _run(self, password: str, dataset_ids: Sequence[str]) -> tuple[int, str]:
+        exit_code, reason = self._work(password, dataset_ids)
+        if self.metadata_only:
+            reason = f"{reason} (metadata only: {self.metadata_summary()})"
+            if self.without_metadata:
+                self.echo("Without metadata: " + ", ".join(self.without_metadata))
+        return exit_code, reason
+
+    def metadata_summary(self) -> str:
+        return f"{self.with_metadata} with metadata, {len(self.without_metadata)} without"
+
+    def _work(self, password: str, dataset_ids: Sequence[str]) -> tuple[int, str]:
         try:
-            for dataset_id in dataset_ids or self.db.runnable(self.access_key):
+            if self.metadata_only and not dataset_ids:
+                dataset_ids = self.listed_datasets()
+            elif not dataset_ids:
+                dataset_ids = self.db.runnable(self.access_key)
+            for dataset_id in dataset_ids:
                 try:
                     self.check_stop()
                 except DatasetStopped:
@@ -240,6 +266,11 @@ class Runner:
             self.echo(f"Run stopped: {exc.kind.value}: {exc}")
             self.echo(FATAL_ADVICE[exc.kind])
             return EXIT_FATAL, f"{exc.kind.value}: {exc}"
+        except ListingFailed as exc:
+            self.echo(f"Run stopped: {exc}")
+            return EXIT_FATAL, str(exc)
+        except DatasetStopped:
+            pass  # stopped while listing the conf's datasets; stop_reason says why
         if self.stop_reason:
             self.echo(f"Run stopped: {self.stop_reason}")
             if self.interrupted:
@@ -249,6 +280,58 @@ class Runner:
                 return EXIT_FATAL, self.stop_reason  # a person has to renew the token
             return EXIT_OK, self.stop_reason
         return EXIT_OK, "finished"
+
+    def listed_datasets(self) -> list[str]:
+        """Every dataset the conf can list, minus those whose metadata is already here.
+
+        Ones the database doesn't know are added as `held`: found through someone's conf,
+        they don't join the full-download backlog until a person `requeue`s them.
+        """
+        listed = self.list_conf_datasets()
+        added = 0
+        wanted: list[str] = []
+        for dataset_id in listed:
+            if self.db.add_dataset(
+                dataset_id,
+                status=HELD,
+                source="listed",
+                note="found by a metadata-only run; `requeue` it to download it in full",
+            ):
+                added += 1
+            record = self.db.dataset(dataset_id)
+            if record is not None and record.status in (COMPLETE, INCOMPLETE):
+                continue  # downloaded already, metadata included
+            wanted.append(dataset_id)
+        self.echo(
+            f"The conf lists {len(listed)} datasets: {added} new (added as held),"
+            f" {len(listed) - len(wanted)} already downloaded, {len(wanted)} to fetch metadata for"
+        )
+        return wanted
+
+    def list_conf_datasets(self) -> list[str]:
+        """`list --datasets` on the first live endpoint that answers, with retries."""
+        errors: list[str] = []
+        for url in self.config.download_urls:
+            if url in self.dead:
+                continue
+            for attempt in range(1, self.config.listing_attempts + 1):
+                self.echo(f"Listing the conf's datasets on {url} (this takes minutes)")
+                result = self.cli.list_datasets(url, deadline=self.deadline)
+                self.check_stop(result)
+                if result.ok:
+                    return parse_dataset_listing(result.output)
+                raise_if_fatal(result)
+                error = last_error_line(result.output)
+                if classify(result.output) is ErrorKind.ENDPOINT_DEAD:
+                    self.mark_dead(url, error)
+                    break
+                errors.append(f"{url}: {error}")
+                self.echo(f"Listing the conf's datasets failed: {error}")
+                if attempt < self.config.listing_attempts:
+                    self.backoff(attempt)
+        raise ListingFailed(
+            "listing the conf's datasets failed: " + ("; ".join(errors) or "no live endpoint")
+        )
 
 
 class DatasetJob:
@@ -264,6 +347,9 @@ class DatasetJob:
         self.checksums: dict[str, str] = {}
 
     def run(self) -> None:
+        if self.runner.metadata_only:
+            self.run_metadata_only()
+            return
         self.db.update_dataset(self.dataset_id, status=IN_PROGRESS, last_error=None)
         self.log(f"Dataset {self.dataset_id}")
         try:
@@ -292,15 +378,44 @@ class DatasetJob:
             self.db.update_dataset(self.dataset_id, status=COMPLETE)
             self.log(f"Complete: {record.files_done} files")
 
+    def run_metadata_only(self) -> None:
+        """Fetch METADATA/ only. The dataset's status and last error stay as they were."""
+        self.log(f"Dataset {self.dataset_id}: metadata only")
+        try:
+            self.download_dataset()
+        except Fatal as exc:
+            self.log(f"Run stopped: {exc.kind.value}: {exc}")
+            raise
+        except DatasetStopped as exc:
+            self.db.refresh_counts(self.dataset_id)
+            self.log(f"Metadata not fetched ({exc.status}): {exc.reason}")
+            if exc.status != INTERRUPTED:
+                self.runner.without_metadata.append(self.dataset_id)
+            return
+        self.db.refresh_counts(self.dataset_id)
+        metadata = [
+            f for f in self.db.files(self.dataset_id)
+            if f.local_path.startswith("METADATA/") and f.state != GONE
+        ]
+        done = sum(f.state == DONE for f in metadata)
+        if done == len(metadata):
+            self.runner.with_metadata += 1
+            self.log(f"Metadata: {done} files")
+        else:
+            self.runner.without_metadata.append(self.dataset_id)
+            self.log(f"Metadata: {done} of {len(metadata)} files; the rest were abandoned")
+
     def download_dataset(self) -> None:
         self.url = self.list_files()
         self.switches = 0
         self.delivered: set[str] = set()  # endpoints that delivered files of it this run
         files = [f for f in self.db.files(self.dataset_id) if f.state != GONE]
+        metadata = [f for f in files if f.local_path.startswith("METADATA/")]
+        images = [f for f in files if not f.local_path.startswith("METADATA/")]
         # What still has to come over the network: files with neither x nor x.c4gh on disk.
         needed = sum(
             f.size
-            for f in files
+            for f in (metadata if self.runner.metadata_only else files)
             if f.state == MISSING
             and not self.plain(f).exists()
             and not encrypted(self.plain(f)).exists()
@@ -311,9 +426,9 @@ class DatasetJob:
             raise DatasetStopped(
                 PENDING, f"needs {gb(needed)}, only {gb(max(room, 0))} free above MIN_FREE_GB"
             )
-        metadata = [f for f in files if f.local_path.startswith("METADATA/")]
-        images = [f for f in files if not f.local_path.startswith("METADATA/")]
         self.fetch(metadata)
+        if self.runner.metadata_only:
+            return
         image_xml = self.folder / IMAGE_XML
         if image_xml.is_file():
             try:

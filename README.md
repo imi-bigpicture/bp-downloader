@@ -87,6 +87,7 @@ Then:
 ./bp-download add aa-Dataset-xxxxxx-xxxxxx   # queue a dataset
 ./bp-download run                            # work through every runnable dataset
 ./bp-download run aa-Dataset-xxxxxx-xxxxxx   # just this one (also runs a held dataset)
+./bp-download run --metadata-only            # only METADATA/, see below
 ./bp-download status                         # one line per dataset
 ./bp-download requeue aa-Dataset-...         # retry abandoned files, or re-run a dataset
 ./bp-download prioritise aa-Dataset-... 10   # higher runs first (default 0)
@@ -237,6 +238,36 @@ at the runtime cap or `TOKEN_MARGIN_HOURS` before the token expires, whichever c
 and warns at the start when it will be the token. Ending on the token stops between calls,
 leaves the dataset `interrupted` (it resumes) and exits 3. `runs` shows the throughput, for
 planning when the next renewal is due.
+
+## Fetching metadata only
+
+```bash
+./bp-download run --metadata-only                        # every dataset the conf can list
+./bp-download run --metadata-only aa-Dataset-xxxxxx-...  # just these (must be in the database)
+SDA_CONFIG=/path/to/secrets/colleague.conf ./bp-download run --metadata-only
+```
+
+Each dataset is listed, and only its `METADATA/` is downloaded, decrypted and checked by size,
+into the same `DATASETS_ROOT/<dataset>/METADATA/` a full run uses. A later full run finds those
+files done and goes straight to the images.
+
+- **Statuses are left alone.** A metadata pass never changes a dataset's status or last
+  error, whatever happens to it: a `pending` dataset stays in the backlog, a `held` one stays
+  held, and a 404 doesn't mark it `no_access`. Its file rows are updated, so `status` shows
+  the metadata as done files.
+- **Without dataset IDs** it first runs `sda-cli list --datasets`, which takes minutes, and
+  covers every dataset listed. One the database doesn't know is added as `held`, with source
+  `listed`, so a plain `run` doesn't start downloading it in full. `requeue` it to put it in
+  the backlog. `complete` and `incomplete` datasets are skipped: their metadata is here.
+- **Another person's conf.** REMS grants access per person, so a colleague's conf may list
+  datasets yours doesn't. Settings in the environment override `.env`, so set `SDA_CONFIG`
+  for the one run. The token's expiry is checked as for any run.
+- **The run's outcome** is in `runs`: the reason reads e.g. `finished (metadata only: 40
+  with metadata, 2 without)`, and the run prints the IDs without metadata. Each dataset's
+  `_download/` log says why. A failed `list --datasets` (after `LISTING_ATTEMPTS` tries)
+  stops the run with exit 3, and nothing is added.
+
+It takes the run lock like any `run`, so it can't start while another run is going.
 
 ## Importing a list of datasets
 
