@@ -62,9 +62,12 @@ sha256sum sda-cli
 A new sda-cli release can change what this code relies on without any error. Before moving
 the pin, read the release notes and the diff since 0.3.5, and check:
 
-1. **The `list` output format**: `list --bytes` output is parsed by `sdacli.parse_listing`,
-   and `sdacli.local_path` mirrors where sda-cli puts each listed file on disk.
-2. **The `download` and `decrypt` flags** this code passes (`sdacli.py`): `--pubkey`,
+1. **The `list` output formats**: `list --dataset --bytes` output is parsed by
+   `sdacli.parse_listing`, and `sdacli.local_path` mirrors where sda-cli puts each listed
+   file on disk. `list --datasets` output (for `run --metadata-only`) is parsed by
+   `sdacli.parse_dataset_listing`, which takes the rows starting with a dataset ID.
+2. **The `list`, `download` and `decrypt` flags** this code passes (`sdacli.py`): `--dataset`,
+   `--datasets`, `--bytes`, `--url` and `--api-version` for `list`; `--pubkey`,
    `--dataset-id`, `--outdir`, `--api-version`, `--ignore-existing` and `--from-file` for
    `download`; `--key` and `--force-overwrite` for `decrypt`. Every call runs with stdin
    closed, so a new prompt would fail the call rather than wait. `decrypt` exits 0 when single
@@ -251,10 +254,15 @@ Each dataset is listed, and only its `METADATA/` is downloaded, decrypted and ch
 into the same `DATASETS_ROOT/<dataset>/METADATA/` a full run uses. A later full run finds those
 files done and goes straight to the images.
 
-- **Statuses are left alone.** A metadata pass never changes a dataset's status or last
-  error, whatever happens to it: a `pending` dataset stays in the backlog, a `held` one stays
-  held, and a 404 doesn't mark it `no_access`. Its file rows are updated, so `status` shows
-  the metadata as done files.
+- **Statuses are left alone.** A metadata pass never changes a dataset's status, last
+  error or `no_access` mark, whatever happens to it: a `pending` dataset stays in the
+  backlog, a `held` one stays held, and a 404 doesn't mark it `no_access`. What a listing
+  always records is recorded: the file rows (so `status` shows the metadata as done files,
+  and files dropped from the listing as `gone`), the file counts, and the endpoint.
+- **Files already on disk are not moved.** A metadata file that was there before the run
+  and fails its size check (or won't decrypt) is left where it is, and the dataset is
+  reported without metadata. Only a copy this run fetched itself goes to quarantine and is
+  fetched again. Files encrypted to another key are left as they are.
 - **Without dataset IDs** it first runs `sda-cli list --datasets`, which takes minutes, and
   covers every dataset listed. One the database doesn't know is added as `held`, with source
   `listed`, so a plain `run` doesn't start downloading it in full. `requeue` it to put it in

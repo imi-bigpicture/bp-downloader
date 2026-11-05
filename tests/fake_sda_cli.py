@@ -18,10 +18,12 @@ Scenario keys:
   version                  printed by `version`
   passphrase               the private key's passphrase
   datasets                 {id: {"prefix": "DATASET_X", "files": {local_path: plaintext}}}
-  endpoints                {url: {"dead": bool, "lists": [ids], "serves": [ids]}}
+  endpoints                {url: {"dead": bool, "lists": [ids], "serves": [ids]}};
+                           "lists" feeds both `list --dataset` and `list --datasets`
   faults                   [{"op", "url"?, "dataset"?, "path"?, "times", "error"?,
                              "sleep"?, "content"?, "touch"?,
                              "ignore_sigint"?}]
+                           op: "list", "list-datasets", "download" or "decrypt"
   expire_token_after_calls the token reads as expired after this many list/download calls
 """
 

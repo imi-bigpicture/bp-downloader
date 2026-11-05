@@ -3,7 +3,7 @@
   bp-download add DATASET_ID...         queue datasets
   bp-download run [DATASET_ID...]       download every runnable dataset, or the named ones
   bp-download run --metadata-only [ID...]  only METADATA/, of the named or all listable datasets
-  bp-download status                   one line per dataset
+  bp-download status                    one line per dataset
   bp-download requeue DATASET_ID...     reset abandoned files, make datasets runnable again
   bp-download import FILE [--adopt]     queue the dataset IDs in a file; adopt folders on disk
   bp-download export-csv PATH           write the status table as CSV, for Windows users

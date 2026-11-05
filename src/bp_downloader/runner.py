@@ -2,6 +2,10 @@
 
 Per dataset: list it, then download, decrypt and verify its metadata, then its images in
 batches. Each batch is decrypted and checked against image.xml as soon as it lands.
+
+A metadata-only run (`run --metadata-only`) stops each dataset after its metadata and leaves
+every dataset's status alone. Without named datasets it first lists every dataset the conf
+can see.
 """
 
 from __future__ import annotations
@@ -10,6 +14,7 @@ import shutil
 import threading
 import time
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -82,6 +87,20 @@ def raise_if_fatal(result: CallResult) -> None:
     kind = classify(result.output)
     if kind in FATAL_KINDS:
         raise Fatal(kind, last_error_line(result.output))
+
+
+def is_metadata(record: FileRecord) -> bool:
+    return record.local_path.startswith("METADATA/")
+
+
+@dataclass
+class Listed:
+    """What asking each live endpoint in turn came to."""
+
+    url: str | None = None  # the endpoint that answered, with `result`; None if none did
+    result: CallResult | None = None
+    not_found: list[str] = field(default_factory=list)  # "url: error", 404/403 answers
+    errors: list[str] = field(default_factory=list)  # "url: error", everything else
 
 
 class DatasetLog:
@@ -239,20 +258,26 @@ class Runner:
             )
 
     def _run(self, password: str, dataset_ids: Sequence[str]) -> tuple[int, str]:
-        exit_code, reason = self._work(password, dataset_ids)
+        exit_code, reason = self._run_datasets(password, dataset_ids)
         if self.metadata_only:
-            reason = f"{reason} (metadata only: {self.metadata_summary()})"
+            reason = (
+                f"{reason} (metadata only: {self.with_metadata} with metadata,"
+                f" {len(self.without_metadata)} without)"
+            )
             if self.without_metadata:
                 self.echo("Without metadata: " + ", ".join(self.without_metadata))
         return exit_code, reason
 
-    def metadata_summary(self) -> str:
-        return f"{self.with_metadata} with metadata, {len(self.without_metadata)} without"
+    def record_metadata(self, dataset_id: str, fetched: bool) -> None:
+        if fetched:
+            self.with_metadata += 1
+        else:
+            self.without_metadata.append(dataset_id)
 
-    def _work(self, password: str, dataset_ids: Sequence[str]) -> tuple[int, str]:
+    def _run_datasets(self, password: str, dataset_ids: Sequence[str]) -> tuple[int, str]:
         try:
             if self.metadata_only and not dataset_ids:
-                dataset_ids = self.listed_datasets()
+                dataset_ids = self.datasets_for_metadata()
             elif not dataset_ids:
                 dataset_ids = self.db.runnable(self.access_key)
             for dataset_id in dataset_ids:
@@ -281,7 +306,7 @@ class Runner:
             return EXIT_OK, self.stop_reason
         return EXIT_OK, "finished"
 
-    def listed_datasets(self) -> list[str]:
+    def datasets_for_metadata(self) -> list[str]:
         """Every dataset the conf can list, minus those whose metadata is already here.
 
         Ones the database doesn't know are added as `held`: found through someone's conf,
@@ -309,29 +334,59 @@ class Runner:
         return wanted
 
     def list_conf_datasets(self) -> list[str]:
-        """`list --datasets` on the first live endpoint that answers, with retries."""
-        errors: list[str] = []
-        for url in self.config.download_urls:
-            if url in self.dead:
-                continue
-            for attempt in range(1, self.config.listing_attempts + 1):
-                self.echo(f"Listing the conf's datasets on {url} (this takes minutes)")
-                result = self.cli.list_datasets(url, deadline=self.deadline)
-                self.check_stop(result)
-                if result.ok:
-                    return parse_dataset_listing(result.output)
-                raise_if_fatal(result)
-                error = last_error_line(result.output)
-                if classify(result.output) is ErrorKind.ENDPOINT_DEAD:
-                    self.mark_dead(url, error)
-                    break
-                errors.append(f"{url}: {error}")
-                self.echo(f"Listing the conf's datasets failed: {error}")
-                if attempt < self.config.listing_attempts:
-                    self.backoff(attempt)
+        """`list --datasets` on the first live endpoint that answers."""
+
+        def call(url: str) -> CallResult:
+            self.echo(f"Listing the conf's datasets on {url} (this takes minutes)")
+            return self.cli.list_datasets(url, deadline=self.deadline)
+
+        def note(url: str, attempt: int, result: CallResult) -> None:
+            if not result.ok:
+                self.echo(f"Listing the conf's datasets failed: {last_error_line(result.output)}")
+
+        listed = self.list_on_live_endpoints(self.config.download_urls, call, note)
+        if listed.result is not None:
+            return parse_dataset_listing(listed.result.output)
+        errors = listed.errors + listed.not_found
         raise ListingFailed(
             "listing the conf's datasets failed: " + ("; ".join(errors) or "no live endpoint")
         )
+
+    def list_on_live_endpoints(
+        self,
+        urls: Sequence[str],
+        call: Callable[[str], CallResult],
+        note: Callable[[str, int, CallResult], None],
+    ) -> Listed:
+        """Ask each live endpoint in turn, retrying each up to LISTING_ATTEMPTS times.
+
+        Stops at the first that answers. A dead endpoint is dropped for the run and a 404/403
+        moves on at once; other errors are retried after a backoff. `note` sees every result.
+        """
+        listed = Listed()
+        for url in urls:
+            if url in self.dead:
+                continue
+            for attempt in range(1, self.config.listing_attempts + 1):
+                result = call(url)
+                note(url, attempt, result)
+                self.check_stop(result)
+                if result.ok:
+                    listed.url, listed.result = url, result
+                    return listed
+                raise_if_fatal(result)
+                kind = classify(result.output)
+                error = last_error_line(result.output)
+                if kind is ErrorKind.ENDPOINT_DEAD:
+                    self.mark_dead(url, error)
+                    break
+                if kind is ErrorKind.NOT_FOUND:
+                    listed.not_found.append(f"{url}: {error}")
+                    break
+                listed.errors.append(f"{url}: {error}")
+                if attempt < self.config.listing_attempts:
+                    self.backoff(attempt)
+        return listed
 
 
 class DatasetJob:
@@ -345,6 +400,9 @@ class DatasetJob:
         self.folder = self.config.datasets_root / dataset_id
         self.log = DatasetLog(self.folder / "_download", runner.echo)
         self.checksums: dict[str, str] = {}
+        # Files with `x` or `x.c4gh` on disk before this run fetched anything. A metadata-only
+        # run never moves these: they may be another tool's or person's copies.
+        self.on_disk_before: set[str] = set()
 
     def run(self) -> None:
         if self.runner.metadata_only:
@@ -388,21 +446,19 @@ class DatasetJob:
             raise
         except DatasetStopped as exc:
             self.db.refresh_counts(self.dataset_id)
-            self.log(f"Metadata not fetched ({exc.status}): {exc.reason}")
+            self.log(f"Metadata not fetched: {exc.reason}")
             if exc.status != INTERRUPTED:
-                self.runner.without_metadata.append(self.dataset_id)
+                self.runner.record_metadata(self.dataset_id, fetched=False)
             return
         self.db.refresh_counts(self.dataset_id)
         metadata = [
-            f for f in self.db.files(self.dataset_id)
-            if f.local_path.startswith("METADATA/") and f.state != GONE
+            f for f in self.db.files(self.dataset_id) if is_metadata(f) and f.state != GONE
         ]
         done = sum(f.state == DONE for f in metadata)
+        self.runner.record_metadata(self.dataset_id, fetched=done == len(metadata))
         if done == len(metadata):
-            self.runner.with_metadata += 1
             self.log(f"Metadata: {done} files")
         else:
-            self.runner.without_metadata.append(self.dataset_id)
             self.log(f"Metadata: {done} of {len(metadata)} files; the rest were abandoned")
 
     def download_dataset(self) -> None:
@@ -410,8 +466,12 @@ class DatasetJob:
         self.switches = 0
         self.delivered: set[str] = set()  # endpoints that delivered files of it this run
         files = [f for f in self.db.files(self.dataset_id) if f.state != GONE]
-        metadata = [f for f in files if f.local_path.startswith("METADATA/")]
-        images = [f for f in files if not f.local_path.startswith("METADATA/")]
+        self.on_disk_before = {
+            f.remote_path for f in files
+            if self.plain(f).exists() or encrypted(self.plain(f)).exists()
+        }
+        metadata = [f for f in files if is_metadata(f)]
+        images = [f for f in files if not is_metadata(f)]
         # What still has to come over the network: files with neither x nor x.c4gh on disk.
         needed = sum(
             f.size
@@ -490,44 +550,31 @@ class DatasetJob:
         record = self.db.dataset(self.dataset_id)
         known = record.endpoint if record else None
         urls = sorted(self.config.download_urls, key=lambda url: url != known)
-        not_found: list[str] = []
-        other_errors: list[str] = []
-        for url in urls:
-            if url in self.runner.dead:
-                continue
-            for attempt in range(1, self.config.listing_attempts + 1):
-                result = self.cli.list_dataset(url, self.dataset_id, deadline=self.runner.deadline)
-                self.log.output(f"list on {url} (attempt {attempt})", result)
-                self.runner.check_stop(result)
-                if result.ok:
-                    listed = parse_listing(result.output)
-                    if not listed:
-                        # bp-slurm-downloader read an empty listing as "complete".
-                        raise DatasetStopped(FAILED, f"listing on {url} returned no files")
-                    stamp = self.log.stamp
-                    (self.log.folder / f"file_listing_{stamp}.txt").write_text(result.output)
-                    for remote_path in self.db.sync_listing(self.dataset_id, listed):
-                        self.log(f"{remote_path}: no longer listed; left on disk as it is")
-                    self.db.update_dataset(self.dataset_id, endpoint=url)
-                    self.log(f"Listed {len(listed)} files on {url}")
-                    return url
-                raise_if_fatal(result)
-                kind = classify(result.output)
-                error = last_error_line(result.output)
-                if kind is ErrorKind.ENDPOINT_DEAD:
-                    self.runner.mark_dead(url, error)
-                    break
-                if kind is ErrorKind.NOT_FOUND:
-                    not_found.append(f"{url}: {error}")
-                    break
-                other_errors.append(f"{url}: {error}")
-                if attempt < self.config.listing_attempts:
-                    self.runner.backoff(attempt)
-        if not_found and not other_errors:
+        outcome = self.runner.list_on_live_endpoints(
+            urls,
+            lambda url: self.cli.list_dataset(url, self.dataset_id, deadline=self.runner.deadline),
+            lambda url, attempt, result: self.log.output(
+                f"list on {url} (attempt {attempt})", result
+            ),
+        )
+        if outcome.url is not None and outcome.result is not None:
+            url, result = outcome.url, outcome.result
+            listed = parse_listing(result.output)
+            if not listed:
+                # bp-slurm-downloader read an empty listing as "complete".
+                raise DatasetStopped(FAILED, f"listing on {url} returned no files")
+            (self.log.folder / f"file_listing_{self.log.stamp}.txt").write_text(result.output)
+            for remote_path in self.db.sync_listing(self.dataset_id, listed):
+                self.log(f"{remote_path}: no longer listed; left on disk as it is")
+            self.db.update_dataset(self.dataset_id, endpoint=url)
+            self.log(f"Listed {len(listed)} files on {url}")
+            return url
+        if outcome.not_found and not outcome.errors:
             raise DatasetStopped(
-                NO_ACCESS, "not granted to this conf's user, or not there: " + "; ".join(not_found)
+                NO_ACCESS,
+                "not granted to this conf's user, or not there: " + "; ".join(outcome.not_found),
             )
-        errors = other_errors + not_found
+        errors = outcome.errors + outcome.not_found
         if not errors:
             raise DatasetStopped(FAILED, "no live endpoint left to list it on")
         raise DatasetStopped(FAILED, "listing failed: " + "; ".join(errors))
@@ -702,6 +749,10 @@ class DatasetJob:
                 if classify(result.output) is ErrorKind.WRONG_KEY:
                     # Re-downloading would replace terabytes that someone holding that key
                     # (an earlier tool's or person's) could still decrypt. Leave it to a person.
+                    if self.runner.metadata_only:
+                        raise DatasetStopped(
+                            HELD, "files on disk are encrypted to another key; left as they are"
+                        )
                     raise DatasetStopped(
                         HELD,
                         "files on disk are encrypted to another key, not PRIVATE_KEY: decrypt"
@@ -711,7 +762,17 @@ class DatasetJob:
                     break  # files left as .c4gh are picked up by the next run
 
     def reject(self, record: FileRecord, reason: str) -> None:
-        """Move a bad file (and its .c4gh) aside, so it is fetched again, and count a failure."""
+        """Move a bad file (and its .c4gh) aside, so it is fetched again, and count a failure.
+
+        A metadata-only run moves only what it fetched itself: a copy that was already on
+        disk is left where it is, and the dataset stops here for this run.
+        """
+        if self.runner.metadata_only and record.remote_path in self.on_disk_before:
+            raise DatasetStopped(
+                FAILED,
+                f"{record.local_path}: {reason}; left in place (a metadata-only run moves"
+                " no file it did not fetch)",
+            )
         quarantine = self.log.folder / "quarantine" / self.log.stamp
         for path in (self.plain(record), encrypted(self.plain(record))):
             if path.exists():

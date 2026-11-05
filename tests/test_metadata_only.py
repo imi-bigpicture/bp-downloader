@@ -138,6 +138,49 @@ def test_an_expired_token_leaves_a_held_dataset_held(world: World) -> None:
     assert world.dataset(DS).status == "held"
 
 
+def test_existing_metadata_that_fails_its_check_is_left_in_place(world: World) -> None:
+    files = world.remote_dataset(DS, {"IMAGE_a": ["a0"]})
+    world.put(DS, "METADATA/dataset.xml", "an older copy, another size")
+    world.queue(DS)
+
+    assert world.cli("run", "--metadata-only", DS) == 0
+
+    on_disk = world.on_disk(DS)
+    assert on_disk["METADATA/dataset.xml"] == "an older copy, another size"
+    assert "METADATA/dataset.xml.c4gh" not in on_disk
+    assert not (world.datasets_root / DS / "_download" / "quarantine").exists()
+    assert not any("dataset.xml" in path for batch in world.download_lists() for path in batch)
+    assert world.files(DS)["METADATA/dataset.xml.c4gh"].failures == 0
+    assert "1 without" in last_run_reason(world)
+    assert files  # the full run, not this one, decides what to do with it
+
+
+def test_metadata_fetched_now_that_fails_its_check_is_fetched_again(world: World) -> None:
+    files = world.remote_dataset(DS, {"IMAGE_a": ["a0"]})
+    bad = world.datasets_root / DS / "METADATA/dataset.xml"
+    world.fault("decrypt", path=str(bad), content="cut", times=1)
+    world.queue(DS)
+
+    assert world.cli("run", "--metadata-only", DS) == 0
+
+    assert world.on_disk(DS) == metadata_of(files)  # only this run's own copy was moved aside
+
+
+def test_metadata_encrypted_to_another_key_is_left_as_it_is(
+    world: World, capsys: pytest.CaptureFixture[str]
+) -> None:
+    files = world.remote_dataset(DS, {"IMAGE_a": ["a0"]})
+    world.put(DS, "METADATA/dataset.xml", files["METADATA/dataset.xml"], other_key=True)
+    world.db().add_dataset(DS, status="held")
+
+    assert world.cli("run", "--metadata-only", DS) == 0
+
+    assert world.dataset(DS).status == "held"
+    assert world.on_disk(DS)["METADATA/dataset.xml.c4gh"].startswith("OTHERKEY:")
+    out = capsys.readouterr().out
+    assert "another key" in out and "requeue" not in out
+
+
 def test_complete_datasets_named_are_skipped(
     world: World, capsys: pytest.CaptureFixture[str]
 ) -> None:
