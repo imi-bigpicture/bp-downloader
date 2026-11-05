@@ -272,9 +272,11 @@ files done and goes straight to the images.
   for the one run. The token's expiry is checked as for any run.
 - **The run's outcome** is in `runs`: the reason reads e.g. `finished (metadata only: 40
   with metadata, 2 without)`, and the run prints the IDs without metadata. Each dataset's
-  `_download/` log says why. A dataset whose listing has no `METADATA/` files at all (some
-  are published that way) counts as without, and its log says the server lists none. A failed `list --datasets` (after `LISTING_ATTEMPTS` tries)
+  `_download/` log says why. A failed `list --datasets` (after `LISTING_ATTEMPTS` tries)
   stops the run with exit 3, and nothing is added.
+- **A dataset with no metadata on the server**, one whose listing has no `METADATA/` files
+  at all (some are published that way), counts as without, and its log says the server
+  lists none.
 
 It takes the run lock like any `run`, so it can't start while another run is going.
 
